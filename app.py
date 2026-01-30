@@ -5,8 +5,9 @@ import pickle
 import os
 import sys
 from datetime import datetime, timedelta
+from sklearn.ensemble import RandomForestRegressor
 
-# Import our pipelines for retraining
+# Import our pipelines (though we won't run full clustering)
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 # Check if files exist before importing to avoid errors if run from wrong dir
 try:
@@ -17,44 +18,171 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Load Model and Data
+# Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'models', 'hospital_model.pkl')
 DATA_PATH = os.path.join(BASE_DIR, 'processed_data.csv')
 RAW_DATA_PATH = os.path.join(BASE_DIR, 'hospital_arrivals.csv')
+INCREMENTAL_DATA_PATH = os.path.join(BASE_DIR, 'incremental_feedback.csv')
 
-def load_system():
-    global model, feature_names, df, data_lookup, avgs
+# Global State
+model = None
+feature_names = []
+base_df = None       # The original loaded static data
+current_df = None    # The working dataset (Base + Incremental)
+data_lookup = {}
+avgs = {}
+
+# --- HELPER: Data Management ---
+
+def load_base_system():
+    global model, feature_names, base_df, current_df, data_lookup, avgs
+    
+    # 1. Load Model (Initial Baseline)
     try:
         with open(MODEL_PATH, 'rb') as f:
             model_data = pickle.load(f)
             model = model_data['model']
             feature_names = model_data['features']
-        print("Model loaded successfully.")
+        print("Base Model loaded.")
     except Exception as e:
         print(f"Error loading model: {e}")
         model = None
+        feature_names = []
 
+    # 2. Load Base Data
     try:
-        df = pd.read_csv(DATA_PATH)
-        df['Date'] = pd.to_datetime(df['Date'])
-        # Ensure strict sorting
-        df = df.sort_values('Date')
-        data_lookup = df.set_index('Date').to_dict('index')
-        avgs = df.mean(numeric_only=True)
-        print("Historical data loaded.")
+        base_df = pd.read_csv(DATA_PATH)
+        base_df['Date'] = pd.to_datetime(base_df['Date'])
+        base_df = base_df.sort_values('Date')
+        
+        # Calculate globals
+        avgs = base_df.mean(numeric_only=True)
+        
+        # Initial Build
+        rebuild_current_dataset()
+        
     except Exception as e:
-        print(f"Error loading data: {e}")
-        df = None
-        data_lookup = {}
-        avgs = {}
+        print(f"Error loading base data: {e}")
+        base_df = None
+
+def rebuild_current_dataset():
+    """
+    Merges Base Data + Incremental Feedback.
+    Recalculates Lags.
+    """
+    global current_df, data_lookup, base_df
+    
+    if base_df is None:
+        return
+
+    # Start with Base
+    combined = base_df.copy()
+    
+    # Load Incremental
+    if os.path.exists(INCREMENTAL_DATA_PATH):
+        try:
+            inc_df = pd.read_csv(INCREMENTAL_DATA_PATH)
+            inc_df['Date'] = pd.to_datetime(inc_df['Date'])
+            
+            # Identify columns to keep/merge
+            # We strictly need Date and Arrivals.
+            # Other columns (Occupancy etc) we might inherit or use defaults.
+            
+            for idx, row in inc_df.iterrows():
+                d = row['Date']
+                arr = row['Actual']
+                
+                # If date exists in Base, Update it
+                mask = combined['Date'] == d
+                if mask.any():
+                    combined.loc[mask, 'Arrivals'] = arr
+                    # We assume Is_FineTuned = 1 for visualization if needed, 
+                    # but pure 'Arrivals' is what matters for training
+                    combined.loc[mask, 'Is_FineTuned'] = 1
+                else:
+                    # Append new row
+                    # We need to fill missing columns (Bed_Occupancy, etc)
+                    # Use AVGS or Defaults
+                    new_row = row.to_dict()
+                    new_row['Arrivals'] = arr
+                    # Fill missing features with averages
+                    for col in combined.columns:
+                        if col not in new_row:
+                            if col in avgs:
+                                new_row[col] = avgs[col]
+                            else:
+                                new_row[col] = 0
+                    
+                    if 'Cluster_Encoded' not in new_row:
+                        new_row['Cluster_Encoded'] = 1 # Default
+                        
+                    combined = pd.concat([combined, pd.DataFrame([new_row])], ignore_index=True)
+            
+        except Exception as e:
+            print(f"Error loading incremental data: {e}")
+
+    # Sort
+    combined = combined.sort_values('Date').reset_index(drop=True)
+    
+    # RECALCULATE FEATURES (Lags)
+    # Because updating yesterday affects today's Lag_1
+    combined['Target_NextDay_Arrivals'] = combined['Arrivals'].shift(-1)
+    
+    for lag in [1, 2, 3, 7]:
+        combined[f'Lag_{lag}'] = combined['Arrivals'].shift(lag)
+    
+    combined['Rolling_Mean_7'] = combined['Arrivals'].rolling(window=7).mean()
+    
+    # Other features like Day_OfWeek need to be ensured if new rows added
+    combined['Day_OfWeek'] = combined['Date'].dt.dayofweek
+    combined['Month'] = combined['Date'].dt.month
+    
+    # Dropna for training purposes (start of dataset)
+    # But keep full for lookup
+    current_df = combined
+    data_lookup = current_df.set_index('Date').to_dict('index')
+    print(f"Dataset Rebuilt. Total Records: {len(current_df)}")
+
+def retrain_model_in_memory():
+    """
+    Performs Rolling Retrain on current_df.
+    Constraints: Only Historical Data (<= Today)
+    """
+    global model
+    
+    if current_df is None: 
+        return
+
+    cutoff = pd.to_datetime(datetime.now().date())
+    
+    # Filter for Training
+    train_df = current_df[current_df['Date'] <= cutoff].copy()
+    train_df = train_df.dropna(subset=feature_names + ['Target_NextDay_Arrivals'])
+    
+    if len(train_df) < 50:
+        print("Not enough data to retrain.")
+        return
+
+    print(f"Retraining Model on {len(train_df)} records...")
+    
+    X = train_df[feature_names]
+    y = train_df['Target_NextDay_Arrivals']
+    
+    # Using RandomForest as it's robust and fast for this size
+    new_model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+    new_model.fit(X, y)
+    
+    model = new_model
+    print("Model Retrained Successfully.")
 
 # Initial Load
-load_system()
+load_base_system()
 
 def get_cutoff_date():
-    """Returns the current system date as the cutoff for Historical vs Future."""
     return pd.to_datetime(datetime.now().date())
+
+# --- ROUTES ---
 
 @app.route('/')
 def index():
@@ -67,249 +195,244 @@ def predict():
 
     data = request.json
     date_str = data.get('date')
-    
     try:
         target_date = pd.to_datetime(date_str)
     except:
         return jsonify({'error': 'Invalid date'}), 400
-
-    cutoff_date = get_cutoff_date()
-
-    # Default response structure
+    
+    cutoff = get_cutoff_date()
+    
+    # Response
     response = {
         'date': date_str,
         'prediction': None,
         'actual': None,
         'is_historical': False,
-        'data_source_type': 'unknown',
         'status': "Future",
         'color': "gray",
-        'message': "No prediction available.",
-        'details': {}
+        'message': "No prediction available."
     }
 
-    # HISTORICAL CHECK
-    if target_date <= cutoff_date:
+    # Historical
+    if target_date <= cutoff:
         response['is_historical'] = True
         if target_date in data_lookup:
-            row = data_lookup[target_date]
-            actual_val = int(row['Arrivals'])
-            response['actual'] = actual_val
+            val = int(data_lookup[target_date]['Arrivals'])
+            response['actual'] = val
+            response['message'] = "Observed Data Point." # Renamed semantics
             
-            # Check source
-            is_ft = row.get('Is_FineTuned', 0)
-            response['data_source_type'] = 'finetuned' if is_ft == 1 else 'original'
-            
-            # For historical, we calculate status based on ACTUAL value
+            # Status
             avg_arr = avgs['Arrivals']
-            std_arr = df['Arrivals'].std() if df is not None else 10
-            
-            if actual_val > avg_arr + 1.5 * std_arr:
-                response['status'] = "Emergency Surge (Actual)"
+            if val > avg_arr * 1.5:
+                response['status'] = "High Load (Observed)"
                 response['color'] = "red"
-                response['message'] = "Historical High Load."
-            elif actual_val < avg_arr - 1.0 * std_arr:
-                response['status'] = "Low Load (Actual)"
-                response['color'] = "green"
-                response['message'] = "Historical Low Load."
             else:
-                response['status'] = "Normal Load (Actual)"
-                response['color'] = "blue" # Blue for normal history
-                response['message'] = "Historical Normal Operation."
+                 response['status'] = "Normal (Observed)"
+                 response['color'] = "blue"
         else:
-            response['message'] = "No historical record for this date."
-        
+            response['message'] = "No data for this date."
         return jsonify(response)
-
-    # FUTURE PREDICTION
     
-    # We need inputs (Lags) from previous days.
+    # Future
+    # Generate features for target_date using current_df (which has up-to-date Lags)
+    # We need to construct the input vector.
     
-    def get_arrival_for_date(d):
-        if d in data_lookup:
-            return data_lookup[d]['Arrivals']
-        return avgs['Arrivals'] # Fallback
+    # If target_date is tomorrow, we use today's lags.
+    # If target_date is far future, we need to iterate (recursive forecast).
+    # For single point predict, we'll try to find it in current_df if it exists (e.g. pre-calculated?), 
+    # but current_df only goes up to max date.
     
-    features = {}
-    features['Lag_1'] = get_arrival_for_date(target_date - timedelta(days=1))
-    features['Lag_2'] = get_arrival_for_date(target_date - timedelta(days=2))
-    features['Lag_3'] = get_arrival_for_date(target_date - timedelta(days=3))
-    features['Lag_7'] = get_arrival_for_date(target_date - timedelta(days=7))
-    features['Rolling_Mean_7'] = avgs['Arrivals'] # Approximation
+    # Let's do a quick recursive generation from Cutoff to Target
+    # Optimize: Just generate inputs based on latest data if target is close?
     
-    # Copy latest known context if available for other features
-    latest_date = df['Date'].max()
-    if latest_date in data_lookup:
-        last_row = data_lookup[latest_date]
-        features['Bed_Occupancy'] = last_row['Bed_Occupancy']
-        features['Avg_Wait_Time'] = last_row['Avg_Wait_Time']
-        features['Cluster_Encoded'] = last_row.get('Cluster_Encoded', 1)
-    else:
-        features['Bed_Occupancy'] = avgs['Bed_Occupancy']
-        features['Avg_Wait_Time'] = avgs['Avg_Wait_Time']
-        features['Cluster_Encoded'] = 1
-
-    features['Day_OfWeek'] = target_date.dayofweek
-    features['Month'] = target_date.month
-
-    # DataFrame creation
-    input_df = pd.DataFrame([features])
-    for col in feature_names:
-        if col not in input_df.columns:
-            input_df[col] = 0
-    input_df = input_df[feature_names]
-
-    # Predict
-    prediction = model.predict(input_df)[0]
-    prediction = int(max(0, prediction))
-
-    # Status Logic
-    avg_arr = avgs['Arrivals']
-    std_arr = df['Arrivals'].std()
+    # Robust: Simulate forward from Cutoff
     
-    if prediction > avg_arr + 1.5 * std_arr:
-        status = "Emergency Surge"
-        color = "orange" # Future warning
-        msg = "Predicted High Load!"
-    elif prediction < avg_arr - 1.0 * std_arr:
-        status = "Low Load"
-        color = "lightgreen"
-        msg = "Predicted Low Load."
-    else:
-        status = "Normal Load"
-        color = "yellow"
-        msg = "Predicted Normal."
-
-    response['prediction'] = prediction
-    response['status'] = status
-    response['color'] = color
-    response['message'] = msg
-    response['details'] = {
-        'day_of_week': target_date.day_name(),
-        'input_features': features
-    }
+    curr = cutoff
+    # Find the row for (curr) to get its values, then predict next day
+    # We need to reach target_date.
     
-    return jsonify(response)
-
-@app.route('/api/history_and_forecast', methods=['GET'])
-def history_and_forecast():
-    """
-    Returns:
-    1. Historical Data (up to Cutoff)
-    2. Forecast Data (Cutoff + 1 to Cutoff + 14 days)
-    """
-    if df is None:
-        return jsonify({'error': 'Data not loaded'}), 500
-        
-    cutoff_date = get_cutoff_date()
+    # Simple check: Is target_date just 1 day ahead?
+    # If so, take Lags from Cutoff.
     
-    # 1. Historical
-    # Filter df <= cutoff
-    hist_df = df[df['Date'] <= cutoff_date].sort_values('Date')
-    # Limit to last 90 days
-    start_history = cutoff_date - timedelta(days=90)
-    hist_df = hist_df[hist_df['Date'] >= start_history]
+    # For the specific 'predict' button which might be any date...
+    # We will just run the simulation loop until we hit target_date
     
-    history_data = hist_df[['Date', 'Arrivals']].copy()
-    history_data['Date'] = history_data['Date'].dt.strftime('%Y-%m-%d')
-    history_list = history_data.to_dict('records')
+    sim_date = cutoff
+    current_feats = {} # We need to grab starting state
     
-    # 2. Forecast
-    # Generate predictions for next 14 days
-    forecast_list = []
-    current_sim_date = cutoff_date + timedelta(days=1)
+    # We can't easily simulate N days instantly without a loop. 
+    # Limit recursion to 30 days.
+    days_diff = (target_date - cutoff).days
+    if days_diff > 30:
+        return jsonify({'error': 'Forecast limited to 30 days ahead.'}), 400
     
-    occupancy = avgs['Bed_Occupancy']
-    wait_time = avgs['Avg_Wait_Time']
+    # Instead of simulating here, let's reuse logic from 'history_and_forecast' 
+    # but that's inefficient.
+    # Simplified: Get features if we can.
     
-    for i in range(14):
-        target_d = current_sim_date + timedelta(days=i)
+    # Construct features using 'get_features_dynamic'
+    # BUT, to get Lag_1 for T, we need prediction for T-1.
+    
+    # ... For this specific endpoint, let's just return "Forecast" if it's in the 14 day window
+    # or error if too far? 
+    # User requirement is "Allow user to enter...".
+    # I'll implement a light loop.
+    
+    # Bootstrap simulation
+    # We need the last known real data to start lags.
+    last_known = current_df[current_df['Date'] <= cutoff].iloc[-1]
+    
+    # This is getting complex to do on the fly for a single point. 
+    # Let's just assume the user asks for tomorrow or within range.
+    # Actually, the user just wants to see the effect.
+    
+    # Quick Loop
+    loop_date = cutoff + timedelta(days=1)
+    
+    # We need a rolling window of recent 'Arrivals' to compute Lags
+    # Get last 10 days from current_df
+    recent_history = current_df[current_df['Date'] <= cutoff].tail(14)['Arrivals'].tolist()
+    
+    pred_val = 0
+    
+    while loop_date <= target_date:
+        # Build features
+        # Lag 1 is recent_history[-1]
         
         feats = {
-            'Lag_1': avgs['Arrivals'], 
-            'Lag_2': avgs['Arrivals'],
-            'Lag_3': avgs['Arrivals'],
-            'Lag_7': avgs['Arrivals'],
-            'Rolling_Mean_7': avgs['Arrivals'],
-            'Bed_Occupancy': occupancy,
-            'Avg_Wait_Time': wait_time,
+            'Lag_1': recent_history[-1],
+            'Lag_2': recent_history[-2],
+            'Lag_3': recent_history[-3],
+            'Lag_7': recent_history[-7],
+            'Rolling_Mean_7': np.mean(recent_history[-7:]),
+            'Bed_Occupancy': avgs.get('Bed_Occupancy', 0.5), # Static assumption for future
+            'Avg_Wait_Time': avgs.get('Avg_Wait_Time', 10),
             'Cluster_Encoded': 1,
-            'Day_OfWeek': target_d.dayofweek,
-            'Month': target_d.month
+            'Day_OfWeek': loop_date.dayofweek,
+            'Month': loop_date.month
         }
         
         inp = pd.DataFrame([feats])
         for col in feature_names:
-            if col not in inp.columns:
-                inp[col] = 0
+            if col not in inp.columns: inp[col] = 0
         inp = inp[feature_names]
         
-        pred = model.predict(inp)[0]
-        val = int(max(0, pred))
+        pred_val = int(model.predict(inp)[0])
         
-        forecast_list.append({
-            'Date': target_d.strftime('%Y-%m-%d'),
-            'Arrivals': val
-        })
+        recent_history.append(pred_val)
+        loop_date += timedelta(days=1)
+
+    response['prediction'] = pred_val
+    response['status'] = "Forecast"
+    response['color'] = "orange"
+    response['message'] = "Future Prediction (Updated Model)"
+    
+    return jsonify(response)
+
+
+@app.route('/api/history_and_forecast', methods=['GET'])
+def history_and_forecast():
+    """
+    Returns data for Google Charts.
+    Cols: [Date, Observed (Baseline), Forecast]
+    """
+    if current_df is None:
+        return jsonify({'error': 'Data not loaded'}), 500
+        
+    cutoff = get_cutoff_date()
+    
+    rows = []
+    
+    # 1. Observed / Baseline (Past)
+    # Using current_df which includes User Corrections
+    hist_subset = current_df[current_df['Date'] <= cutoff].tail(60) # Last 60 days
+    
+    for _, row in hist_subset.iterrows():
+        d_str = row['Date'].strftime('%Y-%m-%d')
+        val = row['Arrivals']
+        rows.append([d_str, val, None]) # Observed, Forecast
+        
+    # 2. Future Forecast (Loop)
+    recent_history = current_df[current_df['Date'] <= cutoff].tail(14)['Arrivals'].tolist()
+    sim_date = cutoff + timedelta(days=1)
+    
+    for i in range(14):
+        feats = {
+            'Lag_1': recent_history[-1],
+            'Lag_2': recent_history[-2],
+            'Lag_3': recent_history[-3],
+            'Lag_7': recent_history[-7],
+            'Rolling_Mean_7': np.mean(recent_history[-7:]),
+            'Bed_Occupancy': avgs.get('Bed_Occupancy', 0.5),
+            'Avg_Wait_Time': avgs.get('Avg_Wait_Time', 10),
+            'Cluster_Encoded': 1,
+            'Day_OfWeek': sim_date.dayofweek,
+            'Month': sim_date.month
+        }
+        
+        inp = pd.DataFrame([feats])
+        for col in feature_names:
+            if col not in inp.columns: inp[col] = 0
+        inp = inp[feature_names]
+        
+        pred = int(model.predict(inp)[0])
+        recent_history.append(pred)
+        
+        d_str = sim_date.strftime('%Y-%m-%d')
+        rows.append([d_str, None, pred])
+        
+        sim_date += timedelta(days=1)
 
     return jsonify({
-        'cutoff_date': cutoff_date.strftime('%Y-%m-%d'),
-        'history': history_list,
-        'forecast': forecast_list
+        'cutoff_date': cutoff.strftime('%Y-%m-%d'),
+        'rows': rows
     })
 
 @app.route('/update_data', methods=['POST'])
 def update_data():
     """
-    Receives user input.
+    Rolling Retrain Endpoint.
+    1. Parse Input.
+    2. Save to incremental_feedback.csv.
+    3. Call rebuild_current_dataset() -> updates Lags.
+    4. Call retrain_model_in_memory().
     """
     try:
         data = request.json
         date_str = data.get('date')
-        arrivals = int(data.get('arrivals'))
-        emergencies = int(data.get('emergencies', 0))
-        
-        target_date = pd.to_datetime(date_str)
-        cutoff_date = get_cutoff_date()
-        
-        if target_date <= cutoff_date:
-            return jsonify({
-                'error': f"Cannot modify historical data (Date <= {cutoff_date.date()}). This system enforces strict separation."
-            }), 400
+        try:
+            actual = float(data.get('arrivals'))
+        except:
+            return jsonify({'error': 'Invalid arrivals'}), 400
             
-        # 1. Append to CSV
-        new_row = {
-            'Date': date_str,
-            'Arrivals': arrivals,
-            'Emergency_Ratio': round(emergencies / arrivals, 2) if arrivals > 0 else 0,
-            'Bed_Occupancy': min(1.0, (arrivals / 80.0)),
-            'Avg_Wait_Time': max(5, (arrivals * 0.5)),
-            'Day_OfWeek': pd.to_datetime(date_str).dayofweek,
-            'Month': pd.to_datetime(date_str).month,
-            'Is_Surge_GroundTruth': 0,
-            'Is_FineTuned': 1 # Mark as user simulation
-        }
+        target_date = pd.to_datetime(date_str)
+        cutoff = get_cutoff_date()
         
-        df_raw = pd.read_csv(RAW_DATA_PATH)
+        if target_date >= cutoff:
+            return jsonify({'error': 'Cannot update future dates.'}), 400
+            
+        # 1. Save
+        new_row = {'Date': date_str, 'Actual': actual}
+        # We save minimal info, rebuild handles the rest
         
-        if date_str in df_raw['Date'].values:
-             df_raw = df_raw[df_raw['Date'] != date_str]
+        if os.path.exists(INCREMENTAL_DATA_PATH):
+            df_inc = pd.read_csv(INCREMENTAL_DATA_PATH)
+            # Remove old
+            df_inc = df_inc[df_inc['Date'] != date_str]
+            df_inc = pd.concat([df_inc, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            df_inc = pd.DataFrame([new_row])
+            
+        df_inc.to_csv(INCREMENTAL_DATA_PATH, index=False)
         
-        df_new = pd.DataFrame([new_row])
-        df_final = pd.concat([df_raw, df_new], ignore_index=True).sort_values('Date')
-        df_final.to_csv(RAW_DATA_PATH, index=False)
+        # 2. Rebuild & Retrain
+        rebuild_current_dataset()
+        retrain_model_in_memory()
         
-        # 2. Trigger Pipeline
-        print("Re-running clustering...")
-        process_and_cluster() 
-        
-        print("Re-training model...")
-        train_forecasting_model() 
-        
-        # 3. Reload System
-        load_system()
-        
-        return jsonify({'status': 'success', 'message': 'Future scenario saved. Model updated to reflect new assumptions.'})
+        return jsonify({
+            'status': 'success',
+            'message': 'Model retrained with new observed data.'
+        })
 
     except Exception as e:
         print(f"Update failed: {e}")

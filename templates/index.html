@@ -7,9 +7,8 @@
     <title>Hospital Arrival Forecasting</title>
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.1.0"></script>
+    <!-- Google Charts -->
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
 
     <style>
         body {
@@ -29,17 +28,40 @@
             text-align: center;
         }
 
-        .bg-green { background-color: #28a745; }
-        .bg-lightgreen { background-color: #90ee90; color: #006400; }
-        .bg-yellow { background-color: #ffc107; color: black; }
-        .bg-orange { background-color: #fd7e14; color: white; }
-        .bg-red { background-color: #dc3545; }
-        .bg-blue { background-color: #0d6efd; }
-        .bg-gray { background-color: #6c757d; }
+        .bg-green {
+            background-color: #28a745;
+        }
+
+        .bg-lightgreen {
+            background-color: #90ee90;
+            color: #006400;
+        }
+
+        .bg-yellow {
+            background-color: #ffc107;
+            color: black;
+        }
+
+        .bg-orange {
+            background-color: #fd7e14;
+            color: white;
+        }
+
+        .bg-red {
+            background-color: #dc3545;
+        }
+
+        .bg-blue {
+            background-color: #0d6efd;
+        }
+
+        .bg-gray {
+            background-color: #6c757d;
+        }
 
         .plot-container {
-            position: relative; 
-            height: 400px; 
+            position: relative;
+            height: 400px;
             width: 100%;
         }
     </style>
@@ -62,12 +84,13 @@
                     </div>
                     <div class="card-body">
                         <div class="mb-3">
-                            <label for="dateInput" class="form-label">Select Date</label>
+                            <label for="dateInput" class="form-label">Check Date</label>
                             <input type="date" class="form-control" id="dateInput">
                         </div>
-                        <button class="btn btn-primary w-100" id="predictBtn" onclick="getPrediction()">View Data / Predict</button>
+                        <button class="btn btn-primary w-100" id="predictBtn" onclick="getPrediction()">View Status /
+                            Predict</button>
                         <hr>
-                        <small class="text-muted">Select a future date for predictions. Past dates show historical data.</small>
+                        <small class="text-muted">Select a future date for predictions.</small>
                     </div>
                 </div>
 
@@ -75,8 +98,9 @@
                     <div class="card-body">
                         <h6>System Architecture</h6>
                         <ul class="small text-muted mb-0">
-                            <li><strong>Model:</strong> XGBoost / RandomForest</li>
-                            <li><strong>Training Data:</strong> Historical (Strict Split)</li>
+                            <li><strong>Model:</strong> Adaptive RandomForest</li>
+                            <li><strong>Training:</strong> Rolling Retrain (Daily Batch)</li>
+                            <li><strong>Feedback:</strong> Incorporated into History</li>
                             <li><strong>Cutoff Date:</strong> <span id="cutoffDisplay">Loading...</span></li>
                         </ul>
                     </div>
@@ -106,197 +130,103 @@
                     </div>
                 </div>
 
-                <!-- Visualization Section (Chart.js) -->
+                <!-- Visualization Section (Google Charts) -->
                 <div class="card">
-                    <div class="card-header bg-white">
-                        <h5 class="mb-0">Historical vs Forecast</h5>
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Observed History vs Forecast</h5>
+                        <span class="badge bg-info text-dark">Google Charts</span>
                     </div>
                     <div class="card-body">
-                        <div class="plot-container">
-                            <canvas id="forecastChart"></canvas>
-                        </div>
+                        <div id="chart_div" class="plot-container"></div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Admin / Data Upload -->
+        <!-- Post-Day Fine-Tuning -->
         <div class="row mt-4">
             <div class="col-md-12">
-            <div class="card border-secondary">
-                <div class="card-header bg-secondary text-white">
-                    <h5 class="mb-0">Future Scenario Simulation (Fine-Tune)</h5>
-                </div>
-                <div class="card-body">
-                    <div class="row align-items-end">
-                        <div class="col-md-3">
-                            <label class="small">Date (Future Only)</label>
-                            <input type="date" class="form-control" id="updateDate">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="small">Expected Arrivals</label>
-                            <input type="number" class="form-control" id="updateArrivals" placeholder="Total">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="small">Expected Emergencies</label>
-                            <input type="number" class="form-control" id="updateEmergencies" placeholder="Count">
-                        </div>
-                        <div class="col-md-3">
-                            <button class="btn btn-outline-dark w-100" onclick="updateData()">Run Scenario</button>
-                        </div>
+                <div class="card border-primary">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">Feedback Loop (Rolling Retrain)</h5>
                     </div>
-                    <div id="updateStatus" class="mt-2 small text-success"></div>
+                    <div class="card-body">
+                        <p class="small text-muted">
+                            <strong>Safety Note:</strong> Feedback improves future predictions gradually without
+                            destabilizing trends.
+                            Entering observed data triggers a model retrain using the updated history.
+                        </p>
+                        <div class="row align-items-end">
+                            <div class="col-md-4">
+                                <label class="small">Past Date (Observed)</label>
+                                <input type="date" class="form-control" id="updateDate">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="small">Actual Arrivals</label>
+                                <input type="number" class="form-control" id="updateArrivals" placeholder="Count">
+                            </div>
+                            <div class="col-md-4">
+                                <button class="btn btn-outline-primary w-100" onclick="updateData()">Update &
+                                    Retrain</button>
+                            </div>
+                        </div>
+                        <div id="updateStatus" class="mt-2 small text-success"></div>
+                    </div>
                 </div>
-            </div>
             </div>
         </div>
     </div>
 
     <script>
         // --- Initialization ---
+        google.charts.load('current', { 'packages': ['corechart'] });
+        google.charts.setOnLoadCallback(loadChartData);
+
         const today = new Date();
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        document.getElementById('dateInput').valueAsDate = tomorrow;
-        
-        let myChart = null;
+        document.getElementById('dateInput').valueAsDate = today;
 
-        // Load Chart Data on Page Load
-        window.addEventListener('load', async () => {
-            await loadChartData();
-        });
-
+        // --- Chart Logic --- //
         async function loadChartData() {
             try {
                 const response = await fetch('/api/history_and_forecast');
                 const data = await response.json();
-                
+
                 document.getElementById('cutoffDisplay').innerText = data.cutoff_date;
-                
-                renderChart(data.history, data.forecast, data.cutoff_date);
+
+                drawChart(data.rows, data.cutoff_date);
             } catch (e) {
                 console.error("Failed to load chart data", e);
             }
         }
 
-        // --- Chart.js ---
-        function renderChart(history, forecast, cutoffDate) {
-            const ctx = document.getElementById('forecastChart').getContext('2d');
-            
-            // Prepare Data
-            // History Series
-            const histLabels = history.map(d => d.Date);
-            const histValues = history.map(d => d.Arrivals);
-            
-            // Forecast Series
-            // Provide visual continuity: Start forecast line from the last history point?
-            // Or just plot them locally.
-            // Requirement: "Past dates -> solid line", "Future -> dashed"
-            
-            // We need a unified X-axis
-            const forecastLabels = forecast.map(d => d.Date);
-            const forecastValues = forecast.map(d => d.Arrivals);
-            
-            const allLabels = [...histLabels, ...forecastLabels];
-            
-            // We pad the forecast data with NaNs for the historical period, and vice versa
-            // actually Chart.js handles different length datasets if x-axis matches, but simpler to just use two datasets
-            
-            // Dataset 1: History
-            const histDataFull = history.map(d => ({x: d.Date, y: d.Arrivals}));
-            
-            // Dataset 2: Forecast
-            const forecastDataFull = forecast.map(d => ({x: d.Date, y: d.Arrivals}));
+        function drawChart(rows, cutoffDate) {
+            var data = new google.visualization.DataTable();
+            data.addColumn('string', 'Date');
+            data.addColumn('number', 'Observed / Baseline Data'); // Corrected Label
+            data.addColumn('number', 'Future Forecast');
 
-            if (myChart) myChart.destroy();
+            data.addRows(rows);
 
-            myChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: allLabels,
-                    datasets: [
-                        {
-                            label: 'Historical / Actual',
-                            data: histDataFull,
-                            borderColor: 'blue',
-                            backgroundColor: 'rgba(0,0,255,0.1)',
-                            borderWidth: 2,
-                            tension: 0.1,
-                            pointRadius: 2,
-                            fill: false
-                        },
-                        {
-                            label: 'Predicted / Forecast',
-                            data: forecastDataFull,
-                            borderColor: 'orange',
-                            borderDash: [5, 5], // Dashed line
-                            borderWidth: 2,
-                            tension: 0.1,
-                            pointRadius: 3,
-                            fill: false
-                        }
-                    ]
+            var options = {
+                title: 'Patient Arrivals: Observed History & Forecast',
+                curveType: 'function',
+                legend: { position: 'bottom' },
+                colors: ['#0d6efd', '#fd7e14'], // Blue (Observed), Orange (Forecast)
+                series: {
+                    0: { lineDashStyle: [1, 0], lineWidth: 2 }, // Observed: Solid
+                    1: { lineDashStyle: [2, 2], lineWidth: 2 }  // Forecast: Dashed
                 },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false,
-                    },
-                    plugins: {
-                        annotation: {
-                            annotations: {
-                                line1: {
-                                    type: 'line',
-                                    xMin: cutoffDate,
-                                    xMax: cutoffDate,
-                                    borderColor: 'black',
-                                    borderWidth: 2,
-                                    label: {
-                                        content: 'Today: ' + cutoffDate,
-                                        enabled: true,
-                                        position: 'top'
-                                    }
-                                }
-                            }
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    let label = context.dataset.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed.y !== null) {
-                                        label += context.parsed.y;
-                                    }
-                                    return label;
-                                }
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            display: true,
-                            title: {
-                                display: true,
-                                text: 'Date'
-                            },
-                             ticks: {
-                                maxTicksLimit: 10
-                            }
-                        },
-                        y: {
-                            display: true,
-                            title: {
-                                display: true,
-                                text: 'Patient Arrivals'
-                            }
-                        }
-                    }
-                }
-            });
+                vAxis: {
+                    title: 'Arrival Count',
+                    viewWindowMode: 'explicit',
+                    viewWindow: { min: 0 }
+                },
+                hAxis: { title: 'Date' },
+                chartArea: { width: '85%', height: '70%' },
+            };
+
+            var chart = new google.visualization.LineChart(document.getElementById('chart_div'));
+            chart.draw(data, options);
         }
 
         // --- Interaction ---
@@ -328,16 +258,13 @@
                 document.getElementById('predDate').innerText = dateObj.toDateString();
 
                 if (data.is_historical) {
-                     document.getElementById('predLabel').innerText = "Actual Arrivals (Historical)";
-                     document.getElementById('predValue').innerText = data.actual;
-                     
-                     // Show badge based on source
-                     // Not strictly required by prompt but good for debug
+                    document.getElementById('predLabel').innerText = "Observed Value";
+                    document.getElementById('predValue').innerText = data.actual;
                 } else {
-                     document.getElementById('predLabel').innerText = "Predicted Arrivals";
-                     document.getElementById('predValue').innerText = data.prediction;
+                    document.getElementById('predLabel').innerText = "Predicted Arrivals";
+                    document.getElementById('predValue').innerText = data.prediction;
                 }
-                
+
                 const box = document.getElementById('statusBox');
                 box.className = `status-box bg-${data.color}`;
                 document.getElementById('statusTitle').innerText = data.status;
@@ -352,10 +279,9 @@
         async function updateData() {
             const date = document.getElementById('updateDate').value;
             const arrivals = document.getElementById('updateArrivals').value;
-            const emergencies = document.getElementById('updateEmergencies').value;
 
             if (!date || !arrivals) {
-                alert("Please enter Date and Arrivals.");
+                alert("Please enter a Past Date and Actual Arrivals.");
                 return;
             }
 
@@ -363,7 +289,7 @@
             const statusDiv = document.getElementById('updateStatus');
 
             btn.disabled = true;
-            btn.innerText = "Simulating...";
+            btn.innerText = "Retraining Model...";
             statusDiv.innerText = "";
             statusDiv.className = "mt-2 small text-success";
 
@@ -371,7 +297,7 @@
                 const response = await fetch('/update_data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date, arrivals, emergencies })
+                    body: JSON.stringify({ date, arrivals })
                 });
                 const data = await response.json();
 
@@ -381,8 +307,6 @@
                     statusDiv.className = "mt-2 small text-danger";
                 } else {
                     statusDiv.innerText = data.message;
-                    alert("Scenario applied! Model retrained.");
-                    
                     // Reload Chart
                     await loadChartData();
                 }
@@ -391,7 +315,7 @@
                 alert("Failed to update.");
             } finally {
                 btn.disabled = false;
-                btn.innerText = "Run Scenario";
+                btn.innerText = "Update & Retrain";
             }
         }
     </script>

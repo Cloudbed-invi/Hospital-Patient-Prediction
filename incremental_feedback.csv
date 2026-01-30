@@ -1,0 +1,3 @@
+Lag_1,Lag_2,Lag_3,Lag_7,Rolling_Mean_7,Bed_Occupancy,Avg_Wait_Time,Cluster_Encoded,Day_OfWeek,Month,Date,Actual,Base_Prediction,Residual
+65.0,69.0,71.0,65.0,52.94556962025317,0.71,47.6,1.0,3.0,1.0,2026-01-29,40.0,56.969788,-16.969788
+,,,,,,,,,,2026-01-28,40.0,,
