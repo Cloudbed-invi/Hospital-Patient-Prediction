@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+*.log
+*.sqlite
+.DS_Store
+.vscode/
+.idea/
+
+# Data (Optional: Uncomment if data is sensitive or too large)
+# *.csv
+# !hospital_arrivals.csv
+# !processed_data.csv
+
+# Models (Optional: Uncomment if models are too large for git)
+# models/
+
+# Secrets
+firebase_credentials.json
+google-credentials.json
+secrets.json
+
+# OS generated files
+Thumbs.db

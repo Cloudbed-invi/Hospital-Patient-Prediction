@@ -207,6 +207,7 @@ def predict():
     response['status'] = "Forecast"
     response['color'] = "orange"
     response['message'] = "Future Prediction (Updated Model)"
+
     return jsonify(response)
 
 
