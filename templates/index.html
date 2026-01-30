@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hospital Arrival Forecasting</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.1.0"></script>
+
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .card {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: none;
+        }
+
+        .status-box {
+            padding: 20px;
+            border-radius: 10px;
+            color: white;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .bg-green { background-color: #28a745; }
+        .bg-lightgreen { background-color: #90ee90; color: #006400; }
+        .bg-yellow { background-color: #ffc107; color: black; }
+        .bg-orange { background-color: #fd7e14; color: white; }
+        .bg-red { background-color: #dc3545; }
+        .bg-blue { background-color: #0d6efd; }
+        .bg-gray { background-color: #6c757d; }
+
+        .plot-container {
+            position: relative; 
+            height: 400px; 
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container py-5">
+        <div class="text-center mb-5">
+            <h1 class="display-4 fw-bold">Hospital Patient Flow Forecast</h1>
+            <p class="lead text-muted">AI-Powered Daily Arrival Predictions & Surge Detection</p>
+        </div>
+
+        <div class="row">
+            <!-- Input Section -->
+            <div class="col-md-4">
+                <div class="card mb-4">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">Forecast Controls</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="dateInput" class="form-label">Select Date</label>
+                            <input type="date" class="form-control" id="dateInput">
+                        </div>
+                        <button class="btn btn-primary w-100" id="predictBtn" onclick="getPrediction()">View Data / Predict</button>
+                        <hr>
+                        <small class="text-muted">Select a future date for predictions. Past dates show historical data.</small>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-body">
+                        <h6>System Architecture</h6>
+                        <ul class="small text-muted mb-0">
+                            <li><strong>Model:</strong> XGBoost / RandomForest</li>
+                            <li><strong>Training Data:</strong> Historical (Strict Split)</li>
+                            <li><strong>Cutoff Date:</strong> <span id="cutoffDisplay">Loading...</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <div class="col-md-8">
+                <!-- Status Box / Result -->
+                <div id="resultSection" style="display:none;" class="mb-4">
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="row align-items-center">
+                                <div class="col-md-6 text-center">
+                                    <h6 class="text-muted" id="predLabel">Arrivals</h6>
+                                    <h2 class="display-2 fw-bold" id="predValue">--</h2>
+                                    <p id="predDate" class="text-muted"></p>
+                                </div>
+                                <div class="col-md-6">
+                                    <div id="statusBox" class="status-box bg-gray">
+                                        <h4 id="statusTitle">--</h4>
+                                        <p id="statusMsg" class="mb-0">--</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Visualization Section (Chart.js) -->
+                <div class="card">
+                    <div class="card-header bg-white">
+                        <h5 class="mb-0">Historical vs Forecast</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="plot-container">
+                            <canvas id="forecastChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin / Data Upload -->
+        <div class="row mt-4">
+            <div class="col-md-12">
+            <div class="card border-secondary">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0">Future Scenario Simulation (Fine-Tune)</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row align-items-end">
+                        <div class="col-md-3">
+                            <label class="small">Date (Future Only)</label>
+                            <input type="date" class="form-control" id="updateDate">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small">Expected Arrivals</label>
+                            <input type="number" class="form-control" id="updateArrivals" placeholder="Total">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small">Expected Emergencies</label>
+                            <input type="number" class="form-control" id="updateEmergencies" placeholder="Count">
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-outline-dark w-100" onclick="updateData()">Run Scenario</button>
+                        </div>
+                    </div>
+                    <div id="updateStatus" class="mt-2 small text-success"></div>
+                </div>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Initialization ---
+        const today = new Date();
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        document.getElementById('dateInput').valueAsDate = tomorrow;
+        
+        let myChart = null;
+
+        // Load Chart Data on Page Load
+        window.addEventListener('load', async () => {
+            await loadChartData();
+        });
+
+        async function loadChartData() {
+            try {
+                const response = await fetch('/api/history_and_forecast');
+                const data = await response.json();
+                
+                document.getElementById('cutoffDisplay').innerText = data.cutoff_date;
+                
+                renderChart(data.history, data.forecast, data.cutoff_date);
+            } catch (e) {
+                console.error("Failed to load chart data", e);
+            }
+        }
+
+        // --- Chart.js ---
+        function renderChart(history, forecast, cutoffDate) {
+            const ctx = document.getElementById('forecastChart').getContext('2d');
+            
+            // Prepare Data
+            // History Series
+            const histLabels = history.map(d => d.Date);
+            const histValues = history.map(d => d.Arrivals);
+            
+            // Forecast Series
+            // Provide visual continuity: Start forecast line from the last history point?
+            // Or just plot them locally.
+            // Requirement: "Past dates -> solid line", "Future -> dashed"
+            
+            // We need a unified X-axis
+            const forecastLabels = forecast.map(d => d.Date);
+            const forecastValues = forecast.map(d => d.Arrivals);
+            
+            const allLabels = [...histLabels, ...forecastLabels];
+            
+            // We pad the forecast data with NaNs for the historical period, and vice versa
+            // actually Chart.js handles different length datasets if x-axis matches, but simpler to just use two datasets
+            
+            // Dataset 1: History
+            const histDataFull = history.map(d => ({x: d.Date, y: d.Arrivals}));
+            
+            // Dataset 2: Forecast
+            const forecastDataFull = forecast.map(d => ({x: d.Date, y: d.Arrivals}));
+
+            if (myChart) myChart.destroy();
+
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: allLabels,
+                    datasets: [
+                        {
+                            label: 'Historical / Actual',
+                            data: histDataFull,
+                            borderColor: 'blue',
+                            backgroundColor: 'rgba(0,0,255,0.1)',
+                            borderWidth: 2,
+                            tension: 0.1,
+                            pointRadius: 2,
+                            fill: false
+                        },
+                        {
+                            label: 'Predicted / Forecast',
+                            data: forecastDataFull,
+                            borderColor: 'orange',
+                            borderDash: [5, 5], // Dashed line
+                            borderWidth: 2,
+                            tension: 0.1,
+                            pointRadius: 3,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        annotation: {
+                            annotations: {
+                                line1: {
+                                    type: 'line',
+                                    xMin: cutoffDate,
+                                    xMax: cutoffDate,
+                                    borderColor: 'black',
+                                    borderWidth: 2,
+                                    label: {
+                                        content: 'Today: ' + cutoffDate,
+                                        enabled: true,
+                                        position: 'top'
+                                    }
+                                }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += context.parsed.y;
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: 'Date'
+                            },
+                             ticks: {
+                                maxTicksLimit: 10
+                            }
+                        },
+                        y: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: 'Patient Arrivals'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- Interaction ---
+
+        async function getPrediction() {
+            const date = document.getElementById('dateInput').value;
+            if (!date) {
+                alert("Please select a date.");
+                return;
+            }
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date: date })
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+
+                // Update UI
+                document.getElementById('resultSection').style.display = 'block';
+
+                const dateObj = new Date(date);
+                document.getElementById('predDate').innerText = dateObj.toDateString();
+
+                if (data.is_historical) {
+                     document.getElementById('predLabel').innerText = "Actual Arrivals (Historical)";
+                     document.getElementById('predValue').innerText = data.actual;
+                     
+                     // Show badge based on source
+                     // Not strictly required by prompt but good for debug
+                } else {
+                     document.getElementById('predLabel').innerText = "Predicted Arrivals";
+                     document.getElementById('predValue').innerText = data.prediction;
+                }
+                
+                const box = document.getElementById('statusBox');
+                box.className = `status-box bg-${data.color}`;
+                document.getElementById('statusTitle').innerText = data.status;
+                document.getElementById('statusMsg').innerText = data.message;
+
+            } catch (error) {
+                console.error("Error:", error);
+                alert("An error occurred while fetching the prediction.");
+            }
+        }
+
+        async function updateData() {
+            const date = document.getElementById('updateDate').value;
+            const arrivals = document.getElementById('updateArrivals').value;
+            const emergencies = document.getElementById('updateEmergencies').value;
+
+            if (!date || !arrivals) {
+                alert("Please enter Date and Arrivals.");
+                return;
+            }
+
+            const btn = document.querySelector('button[onclick="updateData()"]');
+            const statusDiv = document.getElementById('updateStatus');
+
+            btn.disabled = true;
+            btn.innerText = "Simulating...";
+            statusDiv.innerText = "";
+            statusDiv.className = "mt-2 small text-success";
+
+            try {
+                const response = await fetch('/update_data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ date, arrivals, emergencies })
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    alert("Error: " + data.error);
+                    statusDiv.innerText = data.error;
+                    statusDiv.className = "mt-2 small text-danger";
+                } else {
+                    statusDiv.innerText = data.message;
+                    alert("Scenario applied! Model retrained.");
+                    
+                    // Reload Chart
+                    await loadChartData();
+                }
+            } catch (error) {
+                console.error("Error:", error);
+                alert("Failed to update.");
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Run Scenario";
+            }
+        }
+    </script>
+
+</body>
+
+</html>
