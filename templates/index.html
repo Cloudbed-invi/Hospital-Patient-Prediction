@@ -134,7 +134,10 @@
                 <div class="card">
                     <div class="card-header bg-white d-flex justify-content-between align-items-center">
                         <h5 class="mb-0">Observed History vs Forecast</h5>
-                        <span class="badge bg-info text-dark">Google Charts</span>
+                        <div>
+                            <span class="badge bg-secondary me-2">Drag to Zoom</span>
+                            <span class="badge bg-secondary">Right-click Reset</span>
+                        </div>
                     </div>
                     <div class="card-body">
                         <div id="chart_div" class="plot-container"></div>
@@ -199,127 +202,137 @@
             }
         }
 
-        function drawChart(rows, cutoffDate) {
+        function drawChart(serverRows, cutoffDate) {
             var data = new google.visualization.DataTable();
-            data.addColumn('string', 'Date');
-            data.addColumn('number', 'Observed / Baseline Data'); // Corrected Label
-            data.addColumn('number', 'Future Forecast');
+            data.addColumn('date', 'Date');
+            data.addColumn('number', 'Observed');
+            data.addColumn('number', 'Forecast');
+            data.addColumn('number', 'Marker'); // New Series for Vertical Line
+            data.addColumn({ type: 'string', role: 'annotation' }); // Label on Marker
 
-            data.addRows(rows);
+            // 1. Find Max Y to set Marker Height
+            let maxVal = 0;
+            serverRows.forEach(row => {
+                if (row[1] > maxVal) maxVal = row[1];
+                if (row[2] > maxVal) maxVal = row[2];
+            });
+            const markerHeight = maxVal * 1.05; // Slightly above max
+
+            // 2. Process Rows
+            const processedRows = serverRows.map(row => {
+                const dParts = row[0].split('-');
+                const dateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
+
+                let markerVal = null;
+                let annotation = null;
+
+                if (row[0] === cutoffDate) {
+                    markerVal = markerHeight;
+                    annotation = "Today";
+                }
+
+                // [Date, Obs, Fore, Marker, Annotation]
+                return [dateObj, row[1], row[2], markerVal, annotation];
+            });
+
+            data.addRows(processedRows);
 
             var options = {
                 title: 'Patient Arrivals: Observed History & Forecast',
-                curveType: 'function',
                 legend: { position: 'bottom' },
-                colors: ['#0d6efd', '#fd7e14'], // Blue (Observed), Orange (Forecast)
+
+                // COMBO CHART SETTINGS
+                seriesType: 'line',
                 series: {
-                    0: { lineDashStyle: [1, 0], lineWidth: 2 }, // Observed: Solid
-                    1: { lineDashStyle: [2, 2], lineWidth: 2 }  // Forecast: Dashed
+                    0: { color: '#0d6efd', lineWidth: 2, pointSize: 2 }, // Observed
+                    1: { color: '#fd7e14', lineDashStyle: [4, 4], lineWidth: 2, pointSize: 2 }, // Forecast
+                    2: {
+                        type: 'bars',
+                        color: 'black',
+                        visibleInLegend: false
+                    } // Marker
                 },
+
+                // MAKE THE BAR THIN (Mock Vertical Line)
+                bar: { groupWidth: '2' },
+
                 vAxis: {
                     title: 'Arrival Count',
                     viewWindowMode: 'explicit',
-                    viewWindow: { min: 0 }
+                    viewWindow: { min: 0, max: markerHeight * 1.1 }
                 },
-                hAxis: { title: 'Date' },
+                hAxis: {
+                    title: 'Date',
+                    format: 'MMM d',
+                    gridlines: { count: 12 }
+                },
                 chartArea: { width: '85%', height: '70%' },
+
+                explorer: {
+                    actions: ['dragToZoom', 'rightClickToReset'],
+                    axis: 'horizontal',
+                    keepInBounds: true,
+                    maxZoomIn: 0.1
+                },
+
+                annotations: {
+                    alwaysOutside: true,
+                    textStyle: {
+                        color: 'black',
+                        fontSize: 12,
+                        bold: true
+                    },
+                    stem: { color: 'none' } // No stem needed since we have the bar
+                }
             };
 
-            var chart = new google.visualization.LineChart(document.getElementById('chart_div'));
+            // USE COMBO CHART
+            var chart = new google.visualization.ComboChart(document.getElementById('chart_div'));
             chart.draw(data, options);
         }
 
-        // --- Interaction ---
-
+        // --- Interaction (Same as before) ---
         async function getPrediction() {
             const date = document.getElementById('dateInput').value;
-            if (!date) {
-                alert("Please select a date.");
-                return;
-            }
-
+            if (!date) { alert("Select date"); return; }
             try {
-                const response = await fetch('/predict', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date: date })
-                });
-                const data = await response.json();
+                const r = await fetch('/predict', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date }) });
+                const d = await r.json();
+                if (d.error) { alert(d.error); return; }
 
-                if (data.error) {
-                    alert(data.error);
-                    return;
-                }
-
-                // Update UI
                 document.getElementById('resultSection').style.display = 'block';
-
-                const dateObj = new Date(date);
-                document.getElementById('predDate').innerText = dateObj.toDateString();
-
-                if (data.is_historical) {
+                document.getElementById('predDate').innerText = new Date(date).toDateString();
+                if (d.is_historical) {
                     document.getElementById('predLabel').innerText = "Observed Value";
-                    document.getElementById('predValue').innerText = data.actual;
+                    document.getElementById('predValue').innerText = d.actual;
                 } else {
                     document.getElementById('predLabel').innerText = "Predicted Arrivals";
-                    document.getElementById('predValue').innerText = data.prediction;
+                    document.getElementById('predValue').innerText = d.prediction;
                 }
-
-                const box = document.getElementById('statusBox');
-                box.className = `status-box bg-${data.color}`;
-                document.getElementById('statusTitle').innerText = data.status;
-                document.getElementById('statusMsg').innerText = data.message;
-
-            } catch (error) {
-                console.error("Error:", error);
-                alert("An error occurred while fetching the prediction.");
-            }
+                const b = document.getElementById('statusBox');
+                b.className = `status-box bg-${d.color}`;
+                document.getElementById('statusTitle').innerText = d.status;
+                document.getElementById('statusMsg').innerText = d.message;
+            } catch (e) { console.error(e); alert("Error fetching prediction."); }
         }
 
         async function updateData() {
             const date = document.getElementById('updateDate').value;
             const arrivals = document.getElementById('updateArrivals').value;
-
-            if (!date || !arrivals) {
-                alert("Please enter a Past Date and Actual Arrivals.");
-                return;
-            }
-
+            if (!date || !arrivals) { alert("Enter date and arrivals"); return; }
             const btn = document.querySelector('button[onclick="updateData()"]');
-            const statusDiv = document.getElementById('updateStatus');
-
-            btn.disabled = true;
-            btn.innerText = "Retraining Model...";
-            statusDiv.innerText = "";
-            statusDiv.className = "mt-2 small text-success";
-
+            const st = document.getElementById('updateStatus');
+            btn.disabled = true; btn.innerText = "Retraining...";
+            st.innerText = "";
             try {
-                const response = await fetch('/update_data', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ date, arrivals })
-                });
-                const data = await response.json();
-
-                if (data.error) {
-                    alert("Error: " + data.error);
-                    statusDiv.innerText = data.error;
-                    statusDiv.className = "mt-2 small text-danger";
-                } else {
-                    statusDiv.innerText = data.message;
-                    // Reload Chart
-                    await loadChartData();
-                }
-            } catch (error) {
-                console.error("Error:", error);
-                alert("Failed to update.");
-            } finally {
-                btn.disabled = false;
-                btn.innerText = "Update & Retrain";
-            }
+                const r = await fetch('/update_data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date, arrivals }) });
+                const d = await r.json();
+                if (d.error) { alert("Error: " + d.error); st.innerText = d.error; st.className = "mt-2 text-danger"; }
+                else { st.innerText = d.message; await loadChartData(); }
+            } catch (e) { console.error(e); alert("Update failed"); }
+            finally { btn.disabled = false; btn.innerText = "Update & Retrain"; }
         }
     </script>
-
 </body>
 
 </html>
