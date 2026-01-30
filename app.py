@@ -15,6 +15,9 @@ try:
 except ImportError:
     pass
 
+# Import Firebase Service
+import firebase_service
+
 app = Flask(__name__)
 
 # Paths
@@ -37,6 +40,9 @@ avgs = {}
 def load_base_system():
     global model, feature_names, base_df, current_df, data_lookup, avgs
     
+    # 0. Initialize Firebase (Primary Persistence Layer)
+    firebase_service.initialize_firebase()
+
     # 1. Load Model
     try:
         with open(MODEL_PATH, 'rb') as f:
@@ -66,9 +72,20 @@ def rebuild_current_dataset():
 
     combined = base_df.copy()
     
-    if os.path.exists(INCREMENTAL_DATA_PATH):
+    inc_df = pd.DataFrame()
+    
+    # strategy: Try Firebase first (Cloud Master), then CSV (Local/Backup)
+    fb_data = firebase_service.fetch_all_feedback()
+    if fb_data:
+        print("Using data from Firebase.")
+        inc_df = pd.DataFrame(fb_data)
+    elif os.path.exists(INCREMENTAL_DATA_PATH):
+        print("Using data from local CSV.")
+        inc_df = pd.read_csv(INCREMENTAL_DATA_PATH)
+
+    if not inc_df.empty:
         try:
-            inc_df = pd.read_csv(INCREMENTAL_DATA_PATH)
+            inc_df['Date'] = pd.to_datetime(inc_df['Date'])
             inc_df['Date'] = pd.to_datetime(inc_df['Date'])
             
             for idx, row in inc_df.iterrows():
@@ -207,6 +224,14 @@ def predict():
     response['status'] = "Forecast"
     response['color'] = "orange"
     response['message'] = "Future Prediction (Updated Model)"
+    
+    # Save prediction to Firebase (Async/Non-blocking)
+    firebase_service.save_prediction(
+        date_str=date_str, 
+        prediction=pred_val, 
+        cluster_label="Predicted", 
+        alert_level="Normal"
+    )
 
     return jsonify(response)
 
@@ -306,6 +331,10 @@ def update_data():
             df_inc = pd.DataFrame([new_row])
             
         df_inc.to_csv(INCREMENTAL_DATA_PATH, index=False)
+        
+        # Save to Cloud (Firebase)
+        firebase_service.save_feedback(date_str, actual)
+        
         rebuild_current_dataset()
         retrain_model_in_memory()
         

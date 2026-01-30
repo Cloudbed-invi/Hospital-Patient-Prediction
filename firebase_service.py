@@ -99,3 +99,28 @@ def save_feedback(date_str, actual_value, submitted_at=None):
         logger.info(f"Saved feedback for {date_str} to Firebase.")
     except Exception as e:
         logger.error(f"Error saving feedback to Firebase: {e}")
+
+def fetch_all_feedback():
+    """
+    Retrieves all feedback documents from 'feedback' collection.
+    Returns a list of dictionaries [{'Date': str, 'Actual': float}, ...].
+    """
+    if not _is_initialized:
+        return []
+
+    try:
+        docs = _db.collection('feedback').stream()
+        results = []
+        for doc in docs:
+            d = doc.to_dict()
+            # Normalize keys to match what app.py expects (Date, Actual)
+            if 'date' in d and 'user_entered_actual' in d:
+                results.append({
+                    'Date': d['date'],
+                    'Actual': float(d['user_entered_actual'])
+                })
+        logger.info(f"Fetched {len(results)} feedback records from Firebase.")
+        return results
+    except Exception as e:
+        logger.error(f"Error fetching feedback from Firebase: {e}")
+        return []
