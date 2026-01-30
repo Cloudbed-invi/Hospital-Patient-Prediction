@@ -85,7 +85,9 @@ def rebuild_current_dataset():
                         if col not in new_row:
                             new_row[col] = avgs.get(col, 0)
                     if 'Cluster_Encoded' not in new_row: new_row['Cluster_Encoded'] = 1
-                    combined = pd.concat([combined, pd.DataFrame([new_row])], ignore_index=True)
+                    # combined = pd.concat([combined, pd.DataFrame([new_row])], ignore_index=True)
+                    # Skip adding new rows for now unless requested, to keep charts aligned
+                    pass
         except Exception as e:
             print(f"Error loading incremental data: {e}")
 
@@ -175,7 +177,6 @@ def predict():
     recent_history = current_df[current_df['Date'] <= cutoff].tail(14)['Arrivals'].tolist()
     loop_date = cutoff + timedelta(days=1)
     
-    # Limit forecast
     days_diff = (target_date - cutoff).days
     if days_diff > 30: return jsonify({'error': 'Forecast limited to 30 days ahead.'}), 400
     
@@ -213,28 +214,40 @@ def predict():
 def history_and_forecast():
     """
     Returns data for Google Charts.
-    Cols: [Date, Observed (Baseline), Forecast]
+    Cols: [Date, Baseline, Feedback, Forecast]
     """
     if current_df is None: return jsonify({'error': 'Data not loaded'}), 500
     
     cutoff = get_cutoff_date()
     rows = []
     
+    base_lookup = {}
+    if base_df is not None:
+        for _, r in base_df.iterrows():
+            base_lookup[r['Date'].strftime('%Y-%m-%d')] = r['Arrivals']
+
     # 1. Observed / Baseline (Past)
     hist_subset = current_df[current_df['Date'] <= cutoff].tail(60) 
     
     last_val = None
     for _, row in hist_subset.iterrows():
         d_str = row['Date'].strftime('%Y-%m-%d')
-        val = row['Arrivals']
-        rows.append([d_str, val, None]) 
-        last_val = val
+        val_current = row['Arrivals']
+        is_tuned = row.get('Is_FineTuned', 0) == 1
         
-    # BRIDGE POINT: Connect lines
+        # Baseline: original value
+        val_base = base_lookup.get(d_str, val_current if not is_tuned else None)
+        
+        # Feedback: only if tuned
+        val_feedback = val_current if is_tuned else None
+        
+        rows.append([d_str, val_base, val_feedback, None])
+        last_val = val_current 
+        
+    # BRIDGE POINT
     if last_val is not None:
-         # Set the forecast column of the last observed row to the observed value
-         # This makes the Lines meet at the cutoff point
-         rows[-1][2] = last_val
+         # Start forecast at the effective last value
+         rows[-1][3] = last_val
          
     # 2. Future Forecast
     recent_history = current_df[current_df['Date'] <= cutoff].tail(14)['Arrivals'].tolist()
@@ -262,7 +275,7 @@ def history_and_forecast():
         recent_history.append(pred)
         
         d_str = sim_date.strftime('%Y-%m-%d')
-        rows.append([d_str, None, pred])
+        rows.append([d_str, None, None, pred])
         sim_date += timedelta(days=1)
 
     return jsonify({

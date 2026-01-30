@@ -141,6 +141,9 @@
                     </div>
                     <div class="card-body">
                         <div id="chart_div" class="plot-container"></div>
+                        <p class="text-center small text-muted mt-2">
+                            Feedback values are overlaid and do not replace baseline observations.
+                        </p>
                     </div>
                 </div>
             </div>
@@ -205,20 +208,24 @@
         function drawChart(serverRows, cutoffDate) {
             var data = new google.visualization.DataTable();
             data.addColumn('date', 'Date');
-            data.addColumn('number', 'Observed');
-            data.addColumn('number', 'Forecast');
-            data.addColumn('number', 'Marker'); // New Series for Vertical Line
+            data.addColumn('number', 'Observed / Baseline Data');
+            data.addColumn('number', 'Corrected Actual (Feedback)'); // New Column
+            data.addColumn('number', 'Future Forecast');
+            data.addColumn('number', 'Marker');
             data.addColumn({ type: 'string', role: 'annotation' }); // Label on Marker
 
-            // 1. Find Max Y to set Marker Height
+            // 1. Find Max for Marker
             let maxVal = 0;
             serverRows.forEach(row => {
-                if (row[1] > maxVal) maxVal = row[1];
-                if (row[2] > maxVal) maxVal = row[2];
+                if (row[1] > maxVal) maxVal = row[1]; // Base
+                if (row[2] > maxVal) maxVal = row[2]; // Feedback
+                if (row[3] > maxVal) maxVal = row[3]; // Forecast (was idx 2) -> Now Row is [Date, Base, Feed, Fore] 
+                // Wait, server row is [str, Base, Feed, Fore]
             });
-            const markerHeight = maxVal * 1.05; // Slightly above max
+            const markerHeight = maxVal * 1.05;
 
             // 2. Process Rows
+            // Server Row: [DateStr, Base, Feed, Fore]
             const processedRows = serverRows.map(row => {
                 const dParts = row[0].split('-');
                 const dateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
@@ -231,8 +238,8 @@
                     annotation = "Today";
                 }
 
-                // [Date, Obs, Fore, Marker, Annotation]
-                return [dateObj, row[1], row[2], markerVal, annotation];
+                // [Date, Base, Feed, Fore, Marker, Anno]
+                return [dateObj, row[1], row[2], row[3], markerVal, annotation];
             });
 
             data.addRows(processedRows);
@@ -241,19 +248,18 @@
                 title: 'Patient Arrivals: Observed History & Forecast',
                 legend: { position: 'bottom' },
 
-                // COMBO CHART SETTINGS
                 seriesType: 'line',
                 series: {
-                    0: { color: '#0d6efd', lineWidth: 2, pointSize: 2 }, // Observed
-                    1: { color: '#fd7e14', lineDashStyle: [4, 4], lineWidth: 2, pointSize: 2 }, // Forecast
-                    2: {
+                    0: { color: '#0d6efd', lineWidth: 2, pointSize: 2 }, // Baseline (Blue)
+                    1: { color: '#dc3545', lineWidth: 0, pointSize: 6 }, // Feedback (Red Points Only)
+                    2: { color: '#fd7e14', lineDashStyle: [4, 4], lineWidth: 2, pointSize: 2 }, // Forecast (Orange Dash)
+                    3: {
                         type: 'bars',
                         color: 'black',
                         visibleInLegend: false
                     } // Marker
                 },
 
-                // MAKE THE BAR THIN (Mock Vertical Line)
                 bar: { groupWidth: '2' },
 
                 vAxis: {
@@ -282,16 +288,15 @@
                         fontSize: 12,
                         bold: true
                     },
-                    stem: { color: 'none' } // No stem needed since we have the bar
+                    stem: { color: 'none' }
                 }
             };
 
-            // USE COMBO CHART
             var chart = new google.visualization.ComboChart(document.getElementById('chart_div'));
             chart.draw(data, options);
         }
 
-        // --- Interaction (Same as before) ---
+        // --- Interaction ---
         async function getPrediction() {
             const date = document.getElementById('dateInput').value;
             if (!date) { alert("Select date"); return; }
